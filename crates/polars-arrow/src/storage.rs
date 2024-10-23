@@ -40,6 +40,8 @@ enum BackingStorage {
         vtable: &'static VecVTable,
     },
     InternalArrowArray(InternalArrowArray),
+    #[cfg(feature = "arrow_rs")]
+    ArrowBuffer(arrow_buffer::Buffer),
 }
 
 struct SharedStorageInner<T> {
@@ -88,7 +90,9 @@ impl<T> Drop for SharedStorageInner<T> {
 
                 // Free the buffer.
                 (vtable.drop_buffer)(self.ptr.cast(), original_capacity);
-            },
+            }
+            #[cfg(feature = "arrow_rs")]
+            Some(BackingStorage::ArrowBuffer(b)) => drop(b),
             None => {},
         }
     }
@@ -169,6 +173,35 @@ impl<'a, T> Drop for SharedStorageAsVecMut<'a, T> {
             let inner = self.ss.inner.as_ptr();
             inner.write(SharedStorageInner::from_vec(vec));
         }
+    }
+}
+
+#[cfg(feature = "arrow_rs")]
+impl<T: crate::types::NativeType> SharedStorage<T> {
+    pub fn from_arrow_buffer(buffer: arrow_buffer::Buffer) -> Self {
+        let ptr = buffer.as_ptr();
+        let align_offset = ptr.align_offset(align_of::<T>());
+        assert_eq!(align_offset, 0, "arrow_buffer::Buffer misaligned");
+        let length_in_bytes = buffer.len();
+
+        let inner = SharedStorageInner {
+            ref_count: AtomicU64::new(1),
+            ptr: ptr as *mut T,
+            length_in_bytes,
+            backing: Some(BackingStorage::ArrowBuffer(buffer)),
+            phantom: PhantomData,
+        };
+        Self {
+            inner: NonNull::new(Box::into_raw(Box::new(inner))).unwrap(),
+            phantom: PhantomData,
+        }
+    }
+
+    pub fn into_arrow_buffer(self) -> arrow_buffer::Buffer {
+        let ptr = NonNull::new(self.as_ptr() as *mut u8).unwrap();
+        let len = self.len() * size_of::<T>();
+        let arc = std::sync::Arc::new(self);
+        unsafe { arrow_buffer::Buffer::from_custom_allocation(ptr, len, arc) }
     }
 }
 
